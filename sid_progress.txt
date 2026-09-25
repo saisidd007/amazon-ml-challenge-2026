@@ -1,0 +1,128 @@
+================================================================================
+BUSINESS ENTITY RESOLUTION CHALLENGE — PROGRESS REPORT & TECHNICAL SUMMARY
+File: sid_progress.txt
+Generated: 2026-09-25
+================================================================================
+
+1. PROBLEM STATEMENT & OBJECTIVES
+--------------------------------------------------------------------------------
+- Objective: Resolve business entity records from 3 noisy, independent sources
+  (Source 1 reference anchors against Source 2 and Source 3).
+- Scope:
+  * Training Sources: US and India records (2,206,821 Source 1 entities).
+  * Test Sources: US, India, and France (1,732,544 Source 1 entities against ~9.97M S2/S3 records).
+  * Country generalization: Pipeline must handle open-set country strings (including unseen France).
+- Metric: Macro-averaged F_0.5 Score:
+    F_0.5 = (1.25 * Precision * Recall) / (0.25 * Precision + Recall)
+  * Precision-heavy metric: Penalizes false merges 2x more than missed matches.
+  * Singletons: S1 entities with zero true matches score 1.0 if predicted empty, and 0.0 if any false match is predicted.
+
+2. EXPLORATORY DATA ANALYSIS (EDA) & NOISE DISCOVERY
+--------------------------------------------------------------------------------
+- Total Dataset Counts:
+  * train_source1.tsv: 2,206,821 rows (US: 1,323,633 | India: 883,188)
+  * train_source2.tsv: 5,034,616 rows (US: 3,016,817 | India: 2,017,799)
+  * train_source3.tsv: 5,285,603 rows (US: 3,170,056 | India: 2,115,547)
+  * train_ground_truth.tsv: 2,206,821 rows
+  * test_source1.tsv: 1,732,544 rows (India: 809,986 | US: 663,106 | France: 259,452)
+  * test_source2.tsv: 4,887,273 rows
+  * test_source3.tsv: 5,082,316 rows
+
+- Match Distribution per Entity in Ground Truth:
+  * 3 matches: 24.05% (530,841 entities)
+  * 4 matches: 21.94% (484,115 entities)
+  * 2 matches: 17.00% (375,212 entities)
+  * 5 matches: 14.59% (321,957 entities)
+  * 6 matches:  7.47% (164,868 entities)
+  * Singletons (0 matches): 5.58% (123,247 entities)
+  * 1 match:    5.40% (119,157 entities)
+  * 7+ matches: 3.97%
+
+- Key Noise Characteristics Discovered:
+  1. Name corruptions: Legal suffix variations (Corp, LLC, Pvt Ltd, SA, SARL),
+     bracket artifacts ("AMERICAN CHOICE SERVICE [[LLC]]"), DBA prefixes ("Mirapyra formerly ..."),
+     and character typos ("Ricardnosn" vs "Richardson").
+  2. Address corruptions: Reordered components ("MN, Madison, 2476 261st Ave" vs
+     "2476 261st Ave, Madison, Minnesota"), landmark prefixes ("##", "#"), and
+     sub-unit / apartment identifiers ("466 1/2", "13834-A").
+  3. Multilingual diacritics: French accents (é, è, ç, à, etc.) handled via Unicode NFKD.
+
+3. SYSTEM ARCHITECTURE & PIPELINE MODULES
+--------------------------------------------------------------------------------
+Our end-to-end solution is modularized in `code/business_entity_resolution/src/`:
+
+- `preprocessor.py`:
+  * Unicode NFKD diacritic removal (vital for French generalization).
+  * Legal suffix standardization (corp -> corporation, ltd -> limited, pvt -> private).
+  * Address expansion & standardizing US state abbreviations and street types.
+
+- `blocking.py`:
+  * Country-partitioned candidate generation (matches never cross countries).
+  * Discriminative Token Inverted Index: indexes rare/discriminative tokens
+    (ordered by lowest posting count / highest IDF) to retrieve top 35 candidates
+    per entity in sub-milliseconds without memory explosion.
+
+- `feature_engineering.py`:
+  * 30 dense pairwise features computed via C++ accelerated RapidFuzz & Jellyfish:
+    - Name metrics: Levenshtein ratio, Jaro-Winkler, Token Sort Ratio, Token Set Ratio,
+      Partial Ratio, Token Jaccard, Token Containment, Length difference & ratio,
+      Exact match, First word match, Soundex phonetic match.
+    - Address metrics: Levenshtein, Jaro-Winkler, Token Sort/Set, Jaccard, Containment,
+      Exact match, Length diff.
+    - Digit / Structural metrics: Number intersection, Number Jaccard, Number mismatch flag.
+    - Interaction features: Composite harmonic similarity (`overall_avg_sim`),
+      Name x Address Jaro-Winkler product, Name x Address Token Set product.
+
+- `metrics.py`:
+  * Exact competition F_0.5 macro-averaging metric suite including singletons and
+    blocking candidate recall evaluators.
+
+- `train_and_validate.py`:
+  * Rigorous holdout validation experiment with threshold grid search and feature importance analysis.
+
+- `pipeline.py`:
+  * Full production pipeline: loads data via PyArrow, trains regularized LightGBM on
+    ~1,000,000 reference pairs, and runs streaming inference across test countries,
+    directly writing `output/matching_results.tsv` and `output/candidate_pairs.tsv`.
+
+4. VALIDATION RESULTS & EXPERIMENT BENCHMARKS
+--------------------------------------------------------------------------------
+- Best Validation Macro F_0.5 Score: 94.32% (at threshold = 0.65)
+- Singleton Accuracy: 97.33% (correctly preserved empty match sets)
+- Candidate Blocking Recall: 91.20% (achieving 99.98% search space reduction)
+- Top 10 Feature Importances (Gain):
+  1. overall_avg_sim      : 1,109,325.8
+  2. addr_containment     :   522,110.5
+  3. name_x_addr_set      :   242,835.1
+  4. name_jw              :    71,127.4
+  5. num_jaccard          :    46,718.6
+  6. name_partial_ratio   :    34,512.2
+  7. addr_jaccard         :    30,416.8
+  8. has_num_mismatch     :    26,180.1
+  9. name_sort_ratio      :    24,306.9
+  10. name_x_addr_jw      :    21,489.5
+
+5. TECHNICAL CHALLENGES OVERCOME
+--------------------------------------------------------------------------------
+- Challenge 1: Memory Overflow on Large Sparse Matrix Multiplication
+  * Issue: Multiplying 10k x 3.8M sparse matrices in SciPy attempted to allocate 79.3 GiB RAM.
+  * Solution: Developed a Discriminative Token Posting List blocker that queries only the
+    rarest, high-IDF tokens per entity. Memory dropped to <500 MB and speed surged to 100k queries/sec.
+- Challenge 2: Massive TSV Read Latencies (~1.3 GB per source)
+  * Solution: Integrated PyArrow C++ engine in Pandas (`engine='pyarrow'`), reducing file
+    loading times from ~45 seconds down to 3–8 seconds per file.
+- Challenge 3: Overfitting Prevention & Cross-Country Generalization
+  * Solution: Applied LightGBM tree constraints (max depth 8, num leaves 63, feature fraction 0.80,
+    bagging fraction 0.80, L1=0.1, L2=1.0) on scale-invariant string distance ratios.
+
+6. FINAL SUBMISSION PACKAGE DELIVERABLES
+--------------------------------------------------------------------------------
+- `output/matching_results.tsv`: Final predictions (formatted per competition rules).
+- `output/candidate_pairs.tsv`: Candidate blocking sets fed to the ML model.
+- `Documentation_template.md`: Completed methodology report.
+- `code/business_entity_resolution/src/`: Self-contained runnable source code.
+- Validation script: verified locally via `utils/validate_submission.py`.
+
+================================================================================
+END OF PROGRESS REPORT
+================================================================================

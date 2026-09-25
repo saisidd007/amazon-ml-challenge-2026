@@ -1,0 +1,63 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual Environments
+venv/
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Dataset & Student Resources
+6ab10eb3b23ba_student_resource/
+*student_resource*
+dataset/
+datasets/
+data/
+*.tsv
+*.csv
+*.parquet
+*.jsonl
+*.zip
+*.tar.gz
+*.tgz
+*.rar
+
+# Output & Generated Files
+output/
+outputs/
+*.pkl
+*.joblib
+*.model
+*.onnx
+*.pt
+*.pth
+*.h5
+
+# Jupyter Notebook Checkpoints
+.ipynb_checkpoints/
+*/.ipynb_checkpoints/*
+
+# macOS & Windows system files
+.DS_Store
+__MACOSX/
+Thumbs.db
+desktop.ini
+
+# IDEs & Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Environment variables & secrets
+.env
+.env.local
+*.env
+
+# Logs
+*.log
